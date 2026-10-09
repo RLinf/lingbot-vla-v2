@@ -1,3 +1,6 @@
+# Modified for RLinf: lazy dataset imports and PPO-compatible MoE replay.
+# Licensed under Apache-2.0; see LICENSE.
+
 from logging import raiseExceptions
 import einops
 import numpy as np
@@ -252,6 +255,8 @@ class Qwen2TokenMoeBlock(nn.Module):
 
         # EP/fused support: choose expert storage based on moe_implementation
         self._moe_implementation = getattr(config, '_moe_implementation', None) or 'eager'
+        self.allow_inference_kernel = True
+        self.checkpoint_experts = False
         if self._moe_implementation == 'fused':
             self.experts = Qwen2FusedExperts(
                 self.num_experts,
@@ -300,10 +305,26 @@ class Qwen2TokenMoeBlock(nn.Module):
             routing_weights = routing_weights * self.routed_scaling_factor
         routing_weights = routing_weights.to(hidden_states.dtype)
 
+        if self.checkpoint_experts and self.training and torch.is_grad_enabled():
+            from torch.utils.checkpoint import checkpoint
+
+            final_hidden_states = checkpoint(
+                self._compute_experts, hidden_flat, routing_weights, selected_experts,
+                use_reentrant=False,
+            )
+        else:
+            final_hidden_states = self._compute_experts(hidden_flat, routing_weights, selected_experts)
+        return final_hidden_states.reshape(batch_size, sequence_length, hidden_dim), router_logits
+
+    def _compute_experts(self, hidden_flat, routing_weights, selected_experts):
+        # Recompute inside the decoder's FSDP boundary; do not retain BF16
+        # weight copies for every denoising transition. Router statistics are
+        # updated once by forward(), outside the recomputed region.
         # Expert computation: fused (group_gemm) or eager (per-expert loop)
         if self._moe_implementation == 'fused':
             use_robby_moe = (
                 robby_moe_forward is not None
+                and self.allow_inference_kernel
                 and hidden_flat.is_cuda
                 and not self.training
                 and not torch.is_grad_enabled()
@@ -347,7 +368,7 @@ class Qwen2TokenMoeBlock(nn.Module):
             expert_mask = F.one_hot(
                 selected_experts, num_classes=self.num_experts
             ).float()  # (B*T, top_k, num_experts)
-            weights = (expert_mask * routing_weights.unsqueeze(-1).float()).sum(dim=1).to(hidden_states.dtype)  # (B*T, num_experts)
+            weights = (expert_mask * routing_weights.unsqueeze(-1).float()).sum(dim=1).to(hidden_flat.dtype)  # (B*T, num_experts)
             final_hidden_states = torch.einsum('ebd,be->bd', expert_outputs, weights)  # (B*T, D)
 
         # Shared expert: applied to all tokens (fixed shape)
@@ -358,8 +379,7 @@ class Qwen2TokenMoeBlock(nn.Module):
             shared_expert_output = F.sigmoid(self.shared_expert_gate(hidden_flat)) * shared_expert_output
         final_hidden_states = final_hidden_states + shared_expert_output
 
-        final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
-        return final_hidden_states, router_logits
+        return final_hidden_states
 
 
 class Qwen2DecoderLayer(GradientCheckpointingLayer):

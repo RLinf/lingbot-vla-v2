@@ -1,3 +1,6 @@
+# Modified for RLinf: lazy dataset imports and PPO-compatible MoE replay.
+# Licensed under Apache-2.0; see LICENSE.
+
 import einops
 import torch
 from torch import Tensor, nn
@@ -1232,6 +1235,31 @@ class LingbotVlaV2Policy(PreTrainedModel):
 
     def get_optim_params(self) -> dict:
         return self.parameters()
+
+    def set_moe_activation_checkpointing(self, enabled: bool) -> None:
+        """Recompute experts within their owning decoder's FSDP boundary."""
+        for module in self.modules():
+            if isinstance(module, Qwen2TokenMoeBlock):
+                module.checkpoint_experts = bool(enabled)
+
+
+    def set_moe_forward_backend(self, backend: str) -> str:
+        """Select identical differentiable kernels for sampling/gradient replay.
+
+        Automatic inference kernels may differ numerically from the training
+        kernels; this matters when scoring a high-dimensional sampled path.
+        Returns the previous mode so inference callers can restore it.
+        """
+        if backend not in {"auto", "differentiable"}:
+            raise ValueError(f"Unknown MoE forward backend: {backend}")
+        blocks = [module for module in self.modules() if isinstance(module, Qwen2TokenMoeBlock)]
+        previous = {module.allow_inference_kernel for module in blocks}
+        if len(previous) > 1:
+            raise ValueError("Mixed MoE inference backends are not supported")
+        for module in blocks:
+            module.allow_inference_kernel = backend == "auto"
+        return "auto" if not previous or True in previous else "differentiable"
+
 
     def forward(
         self,

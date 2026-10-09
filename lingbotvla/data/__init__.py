@@ -1,3 +1,6 @@
+# Modified for RLinf: lazy dataset imports and PPO-compatible MoE replay.
+# Licensed under Apache-2.0; see LICENSE.
+
 # Copyright 2025 Bytedance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,22 +16,34 @@
 # limitations under the License.
 
 
-from .chat_template import build_chat_template
-from .data_collator import (
-    CollatePipeline,
-    DataCollatorWithPacking,
-    DataCollatorWithPadding,
-    DataCollatorWithPositionIDs,
-    MakeMicroBatchCollator,
-    TextSequenceShardCollator,
-    UnpackDataCollator,
-)
-from .data_loader import build_dataloader
-from .dataset import build_iterative_dataset, build_mapping_dataset, build_vla_dataset
-from .multimodal.data_collator import (
-    OmniDataCollatorWithPacking,
-    OmniDataCollatorWithPadding,
-    OmniSequenceShardCollator,
-    VLADataCollatorWithPacking,
-)
-from .multimodal.multimodal_chat_template import build_multimodal_chat_template
+from importlib import import_module
+
+
+# Model preprocessing and data.constants must not require offline LeRobot datasets.
+# Keep the training-facing exports, importing each implementation when requested.
+_EXPORTS = {
+    "build_chat_template": ".chat_template",
+    "build_dataloader": ".data_loader",
+    "build_iterative_dataset": ".dataset",
+    "build_mapping_dataset": ".dataset",
+    "build_vla_dataset": ".dataset",
+    "build_multimodal_chat_template": ".multimodal.multimodal_chat_template",
+    **{name: ".data_collator" for name in (
+        "CollatePipeline", "DataCollatorWithPacking", "DataCollatorWithPadding",
+        "DataCollatorWithPositionIDs", "MakeMicroBatchCollator",
+        "TextSequenceShardCollator", "UnpackDataCollator",
+    )},
+    **{name: ".multimodal.data_collator" for name in (
+        "OmniDataCollatorWithPacking", "OmniDataCollatorWithPadding",
+        "OmniSequenceShardCollator", "VLADataCollatorWithPacking",
+    )},
+}
+__all__ = list(_EXPORTS)
+
+
+def __getattr__(name):
+    if name not in _EXPORTS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(import_module(_EXPORTS[name], __name__), name)
+    globals()[name] = value
+    return value
