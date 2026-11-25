@@ -365,12 +365,13 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
             )
             if self.config.attention_implementation == "flex_cached":
                 if layer_idx == 0:
-                    _full_len = query_states.shape[1]
+                    _query_len = query_states.shape[1]
+                    _kv_len = key_states.shape[1]
                     _full_block_mask = build_block_mask(
                         attention_mask,
                         self.qwenvl.config.text_config.num_attention_heads,
-                        _full_len,
-                        _full_len,
+                        _query_len,
+                        _kv_len,
                     )
                 att_output = flex_attention_with_block_mask(
                     query_states, key_states, value_states, _full_block_mask, query_states.shape[1]
